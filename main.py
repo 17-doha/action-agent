@@ -9,7 +9,6 @@ Open Booking.com and login using my Google account.
 Write username and password after clicking to login with google only.
 Username: dohaahemdan@gmail.com
 click next
-Password: Dohah#2771994 
 Search for a hotel in Giza, Egypt for 1 adult from July 17 to July 20, 2025.  
 Click on the first available option with good reviews.  
 Proceed to reserve the room with free cancellation if available.  
