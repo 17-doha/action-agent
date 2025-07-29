@@ -6,6 +6,7 @@ from browser_use.llm import ChatGoogle  # or another model provider
 import os
 load_dotenv()  # Loads API keys from .env file
 
+
 task_prompt = """
 {
   "header": "You are a browser automation agent.",
@@ -121,6 +122,7 @@ task_prompt = """
   "finalValidation": "If the confirmation page is not reached, report: ⚠️ 'Booking failed or confirmation not reached. Investigate login or room availability issues.'"
 }
 
+
 """
 async def main():
     agent = Agent(
@@ -132,5 +134,7 @@ async def main():
     result = await agent.run()
     print(result)
 
+
 if __name__ == "__main__":
     asyncio.run(main())
+
