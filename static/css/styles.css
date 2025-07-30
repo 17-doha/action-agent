@@ -1,0 +1,112 @@
+body {
+    background: #f7faff;
+    font-family: Arial, sans-serif;
+    min-height: 100vh;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+}
+.container {
+    max-width: 700px;
+    margin: 11vh auto 0 auto;
+    padding: 58px 48px 62px 48px;
+    background: white;
+    border-radius: 28px;
+    box-shadow: 0 2px 22px rgba(80, 120, 180, 0.12);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+.logo {
+    font-size: 3.1rem;
+    font-weight: bold;
+    letter-spacing: 1.2px;
+    color: #4177e7;
+    margin-bottom: 44px;
+    margin-top: 0;
+    text-align: center;
+}
+.search-box {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    margin-bottom: 38px;
+}
+.search-input {
+    flex: 1;
+    font-size: 1.45rem;
+    padding: 22px 28px;
+    border: 2px solid #a9bcdf;
+    border-radius: 2.2em;
+    outline: none;
+    transition: border-color 0.2s;
+    box-sizing: border-box;
+    min-width: 0;
+}
+.search-input:focus {
+    border-color: #4177e7;
+}
+.search-btn {
+    margin-left: -73px;
+    background: #4177e7;
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 57px;
+    height: 57px;
+    cursor: pointer;
+    font-size: 1.38rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 1px 7px rgba(40,60,120,0.06);
+    transition: background 0.18s;
+}
+.search-btn:active {
+    background: #2655b8;
+}
+#gif-container {
+    margin-top: 43px;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 65px;
+}
+#loader {
+    margin-top: 22px;
+}
+.search-textarea {
+    flex: 1;
+    font-size: 1.32rem;
+    padding: 21px 26px;
+    border: 2px solid #a9bcdf;
+    border-radius: 2.2em;
+    outline: none;
+    resize: vertical;
+    min-height: 95px;
+    max-height: 350px;
+    min-width: 0;
+    width: 100%;
+    background: #fafcff;
+    transition: border-color 0.2s;
+    box-sizing: border-box;
+    line-height: 1.55;
+}
+.search-textarea:focus {
+    border-color: #4177e7;
+}
+
+.search-box {
+    width: 100%;
+    display: flex;
+    align-items: flex-start;
+    margin-bottom: 38px;
+}
+
+@media (max-width: 900px) {
+    .container { max-width: 98vw; padding: 18px 2vw 26px 2vw;}
+    .logo { font-size: 2.3rem;}
+    .search-input { font-size: 1.13rem; padding: 15px 15px;}
+    .search-btn { width: 44px; height: 44px; font-size: 1.04rem; margin-left: -55px;}
+}
