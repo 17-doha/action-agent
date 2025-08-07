@@ -1,0 +1,23 @@
+# Ignore virtual environments
+venv/
+.env
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# VS Code settings
+.vscode/
+
+# Test output
+*.log
+*.out
+
+# Windows system files
+Thumbs.db
+
+# Python environment and package management
+*.egg-info/
+dist/
+build/
