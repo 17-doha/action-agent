@@ -1,0 +1,13 @@
+2025/08/10-03:21:07.960 e48 Reusing MANIFEST C:\Users\Doha\new\action-agent\user_data\Default\IndexedDB\https_cf.bstatic.com_0.indexeddb.leveldb/MANIFEST-000001
+2025/08/10-03:21:07.961 e48 Recovering log #7
+2025/08/10-03:21:07.961 e48 Reusing old log C:\Users\Doha\new\action-agent\user_data\Default\IndexedDB\https_cf.bstatic.com_0.indexeddb.leveldb/000007.log 
+2025/08/10-03:21:07.975 e48 Level-0 table #11: started
+2025/08/10-03:21:07.987 e48 Level-0 table #11: 1336 bytes OK
+2025/08/10-03:21:07.989 e48 Delete type=0 #7
+2025/08/10-03:21:07.990 e48 Manual compaction at level-0 from '\x00\x03\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x04\x00\x00\x00' @ 0 : 0; will stop at '\x00\x03\x01\x03\x03\x00\x00\x00\x00\x00\x00\xf0?' @ 221 : 1
+2025/08/10-03:21:07.990 e48 Compacting 1@0 + 1@1 files
+2025/08/10-03:21:08.003 e48 Generated table #12@0: 28 keys, 663 bytes
+2025/08/10-03:21:08.003 e48 Compacted 1@0 + 1@1 files => 663 bytes
+2025/08/10-03:21:08.005 e48 compacted to: files[ 0 1 1 0 0 0 0 ]
+2025/08/10-03:21:08.005 e48 Delete type=2 #11
+2025/08/10-03:21:08.006 e48 Manual compaction at level-0 from '\x00\x03\x01\x03\x03\x00\x00\x00\x00\x00\x00\xf0?' @ 221 : 1 .. '\x00\x04\x00\x00\x00' @ 0 : 0; will stop at (end)

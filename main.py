@@ -9,8 +9,9 @@ from browser_use.llm import ChatGoogle
 from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field
 from typing import List
-
+import json
 from langchain_core.language_models import BaseChatModel
+from utils.mcp_client import create_tool_param_model, setup_mcp_client_and_tools
 
 import logging
 import inspect
@@ -26,7 +27,6 @@ from browser_use.controller.views import (
     ExtractPageContentAction,
     GoToUrlAction,
     InputTextAction,
-    OpenTabAction,
     ScrollAction,
     SearchGoogleAction,
     SendKeysAction,
@@ -45,6 +45,9 @@ def time_execution_sync(label):
     return decorator
 
 load_dotenv()
+
+class OpenTabAction(BaseModel):
+	url: str
 
 class Step(BaseModel):
     action: str = Field(description="The action taken in this step")
@@ -185,15 +188,19 @@ class CustomController(Controller):
                   page_extraction_llm: Optional[BaseChatModel] = None,
                   sensitive_data: Optional[Dict[str, str]] = None,
                   available_file_paths: Optional[list[str]] = None,
-                  context: Context | None = None) -> ActionResult:
+                  context: Context | None = None,
+                  browser_session: Any = None,  # <-- Added this parameter
+                  file_system: Any = None       # <-- Add this parameter
+                  ) -> ActionResult:
         try:
             for action_name, params in action.model_dump(exclude_unset=True).items():
                 if params is not None:
                     result = await self.registry.execute_action(
                         action_name,
                         params,
-                        browser=browser_context,
+                        browser_session=browser_session,           # <-- use browser_session
                         page_extraction_llm=page_extraction_llm,
+                        file_system=file_system,
                         sensitive_data=sensitive_data,
                         available_file_paths=available_file_paths,
                         context=context,
@@ -210,31 +217,35 @@ class CustomController(Controller):
             return ActionResult()
         except Exception as e:
             raise e
-    # async def setup_mcp_client(self, mcp_server_config: Optional[Dict[str, Any]] = None):
-    #     self.mcp_server_config = mcp_server_config
-    #     if self.mcp_server_config:
-    #         self.mcp_client = await setup_mcp_client_and_tools(self.mcp_server_config)
-    #         self.register_mcp_tools()
+    async def setup_mcp_client(self, mcp_server_config: Optional[Dict[str, Any]] = None):
+        self.mcp_server_config = mcp_server_config
+        if self.mcp_server_config:
+            self.mcp_client = await setup_mcp_client_and_tools(self.mcp_server_config)
+            self.register_mcp_tools()
 
-    # def register_mcp_tools(self):
-    #     if self.mcp_client:
-    #         for server_name in self.mcp_client.server_name_to_tools:
-    #             for tool in self.mcp_client.server_name_to_tools[server_name]:
-    #                 tool_name = f"mcp.{server_name}.{tool.name}"
-    #                 self.registry.registry.actions[tool_name] = RegisteredAction(
-    #                     name=tool_name,
-    #                     description=tool.description,
-    #                     function=tool,
-    #                     param_model=create_tool_param_model(tool),
-    #                 )
-    #                 logger.info(f"Add mcp tool: {tool_name}")
-    #             logger.debug(f"Registered {len(self.mcp_client.server_name_to_tools[server_name])} mcp tools for {server_name}")
-    #     else:
-    #         logger.warning("MCP client not started.")
+    def register_mcp_tools(self):
+        """
+        Register the MCP tools used by this controller.
+        """
+        if self.mcp_client:
+            for server_name in self.mcp_client.server_name_to_tools:
+                for tool in self.mcp_client.server_name_to_tools[server_name]:
+                    tool_name = f"mcp.{server_name}.{tool.name}"
+                    self.registry.registry.actions[tool_name] = RegisteredAction(
+                        name=tool_name,
+                        description=tool.description,
+                        function=tool,
+                        param_model=create_tool_param_model(tool),
+                    )
+                    logger.info(f"Add mcp tool: {tool_name}")
+                logger.debug(
+                    f"Registered {len(self.mcp_client.server_name_to_tools[server_name])} mcp tools for {server_name}")
+        else:
+            logger.warning(f"MCP client not started.")
 
-    # async def close_mcp_client(self):
-    #     if self.mcp_client:
-    #         await self.mcp_client.__aexit__(None, None, None)
+    async def close_mcp_client(self):
+        if self.mcp_client:
+            await self.mcp_client.__aexit__(None, None, None)
 
 async def run_agent_task(prompt: str):
     ensure_dirs()
@@ -247,6 +258,20 @@ async def run_agent_task(prompt: str):
     screenshots = []
 
     stop_capture_flag = [False]
+
+     # --- MCP server config loading ---
+    mcp_server_config = None
+    mcp_config_path = "mcp_server.json"
+    if os.path.exists(mcp_config_path):
+        with open(mcp_config_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            if content:
+                mcp_server_config = json.loads(content)
+                print(f"[DEBUG] Loaded MCP server config from {mcp_config_path}")
+            else:
+                print(f"[DEBUG] MCP server config file is empty: {mcp_config_path}")
+    else:
+        print(f"[DEBUG] MCP server config file not found: {mcp_config_path}")
 
     async with async_playwright() as playwright:
         try:
@@ -280,6 +305,9 @@ async def run_agent_task(prompt: str):
         capture_task = asyncio.create_task(capture_loop())
 
         controller = CustomController(output_model=TestResult)
+        
+        if mcp_server_config:
+            await controller.setup_mcp_client(mcp_server_config)
 
         agent = Agent(
             task=prompt,
@@ -302,6 +330,8 @@ async def run_agent_task(prompt: str):
             stop_capture_flag[0] = True
             await capture_task
             await browser.close()
+            if mcp_server_config:
+                await controller.close_mcp_client()
 
     generate_gif_from_images(screenshots, gif_path)
 
