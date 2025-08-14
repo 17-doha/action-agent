@@ -1,3 +1,6 @@
-2025/08/10-03:16:35.557 2d68 Reusing MANIFEST C:\Users\Doha\new\action-agent\user_data\Default\Local Storage\leveldb/MANIFEST-000001
-2025/08/10-03:16:35.562 2d68 Recovering log #6
-2025/08/10-03:16:35.564 2d68 Reusing old log C:\Users\Doha\new\action-agent\user_data\Default\Local Storage\leveldb/000006.log 
+2025/08/13-22:15:13.559 1142c Reusing MANIFEST C:\Users\Doha\new\action-agent\user_data\Default\Local Storage\leveldb/MANIFEST-000001
+2025/08/13-22:15:13.590 1142c Recovering log #17
+2025/08/13-22:15:13.593 1142c Reusing old log C:\Users\Doha\new\action-agent\user_data\Default\Local Storage\leveldb/000017.log 
+2025/08/13-22:18:20.387 1142c Level-0 table #21: started
+2025/08/13-22:18:20.395 1142c Level-0 table #21: 53141 bytes OK
+2025/08/13-22:18:20.397 1142c Delete type=0 #17

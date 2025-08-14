@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 Context = TypeVar("Context")
 
 
+
 def time_execution_sync(label):
     def decorator(func):
         def wrapper(*args, **kwargs):
@@ -94,7 +95,7 @@ def generate_gif_from_images(image_paths, output_path):
                 # Resize image to target size if it doesn't match
                 if img.size != target_size:
                     img = img.resize(target_size, Image.Resampling.LANCZOS)
-                    print(f"[→] Resized {img_path} from original size to {target_size}")
+                    print(f"[↻] Resized {img_path} from original size to {target_size}")
                 images.append(img)
             except Exception as e:
                 print(f"[!] Failed to process {img_path}: {e}")
@@ -103,13 +104,11 @@ def generate_gif_from_images(image_paths, output_path):
     if len(images) >= 2:
         try:
             imageio.mimsave(output_path, images, fps=1)
-            print(f"[✔] GIF generated: {output_path} (size: {os.path.getsize(output_path)} bytes)")
+            print(f"[✓] GIF generated: {output_path} (size: {os.path.getsize(output_path)} bytes)")
         except Exception as e:
             print(f"[ERROR] Failed to create GIF: {e}")
     else:
         print("[!] Not enough images to create a GIF.")
-
-
 
 
 class CustomController(Controller):
@@ -182,6 +181,67 @@ class CustomController(Controller):
                 logger.info(msg)
                 return ActionResult(error=msg)
 
+        # Enhanced action for intelligent waiting and tab management
+        @self.registry.action(
+            "Wait for content to load and check for new tabs. Use this after navigation, form submission, or clicking links that might open new content."
+        )
+        async def wait_and_check_tabs(browser: BrowserContext, wait_seconds: int = 3):
+            try:
+                # Wait for the specified duration
+                await asyncio.sleep(wait_seconds)
+                
+                # Check current tab count
+                page_count = len(browser.browser.pages)
+                
+                # Get current page title and URL for context
+                current_page = browser.browser.pages[browser.browser.pages.index(browser.page)]
+                current_title = await current_page.title()
+                current_url = current_page.url
+                
+                msg = f"Waited {wait_seconds}s. Current page: '{current_title}' at {current_url}. Total tabs: {page_count}"
+                
+                # If there are multiple tabs, provide information about them
+                if page_count > 1:
+                    msg += f". Multiple tabs detected - consider switching if new content opened."
+                
+                logger.info(msg)
+                return ActionResult(extracted_content=msg, include_in_memory=True)
+                
+            except Exception as e:
+                error_msg = f'Failed to wait and check tabs: {str(e)}'
+                logger.error(error_msg)
+                return ActionResult(error=error_msg)
+
+        @self.registry.action(
+            "Switch to the most recently opened tab. Use this when you suspect a new tab was opened by your previous action."
+        )
+        async def switch_to_latest_tab(browser: BrowserContext):
+            try:
+                pages = browser.browser.pages
+                if len(pages) > 1:
+                    # Switch to the last (most recent) tab
+                    latest_page = pages[-1]
+                    await latest_page.bring_to_front()
+                    
+                    # Update the browser context to use the new page
+                    browser.page = latest_page
+                    
+                    # Get page info
+                    title = await latest_page.title()
+                    url = latest_page.url
+                    
+                    msg = f"Switched to latest tab: '{title}' at {url}"
+                    logger.info(msg)
+                    return ActionResult(extracted_content=msg, include_in_memory=True)
+                else:
+                    msg = "Only one tab open, no need to switch"
+                    return ActionResult(extracted_content=msg, include_in_memory=True)
+                    
+            except Exception as e:
+                error_msg = f'Failed to switch to latest tab: {str(e)}'
+                logger.error(error_msg)
+                return ActionResult(error=error_msg)
+
     @time_execution_sync('--act')
     async def act(self, action: ActionModel,
                   browser_context: Optional[BrowserContext] = None,
@@ -189,8 +249,8 @@ class CustomController(Controller):
                   sensitive_data: Optional[Dict[str, str]] = None,
                   available_file_paths: Optional[list[str]] = None,
                   context: Context | None = None,
-                  browser_session: Any = None,  # <-- Added this parameter
-                  file_system: Any = None       # <-- Add this parameter
+                  browser_session: Any = None,
+                  file_system: Any = None
                   ) -> ActionResult:
         try:
             for action_name, params in action.model_dump(exclude_unset=True).items():
@@ -198,13 +258,33 @@ class CustomController(Controller):
                     result = await self.registry.execute_action(
                         action_name,
                         params,
-                        browser_session=browser_session,           # <-- use browser_session
+                        browser_session=browser_session,
                         page_extraction_llm=page_extraction_llm,
                         file_system=file_system,
                         sensitive_data=sensitive_data,
                         available_file_paths=available_file_paths,
                         context=context,
                     )
+
+                    # --- Enhanced Tab Management ---
+                    if action_name in ["open_tab", "switch_tab"]:
+                        tab_index = None
+                        # Try to get the tab index from params
+                        if isinstance(params, dict) and "index" in params:
+                            tab_index = params["index"]
+                        elif hasattr(params, "index"):
+                            tab_index = getattr(params, "index", None)
+                        # If open_tab and no index is provided, assume last tab (highest index)
+                        if action_name == "open_tab" and hasattr(browser_session, "get_tab_count"):
+                            try:
+                                tab_count = await browser_session.get_tab_count()
+                                tab_index = tab_count - 1  # last tab index
+                            except Exception:
+                                tab_index = None
+                        # Switch to the determined tab index
+                        if tab_index is not None and hasattr(browser_session, "switch_to_tab"):
+                            await browser_session.switch_to_tab(tab_index)
+                    # --- End Enhancement ---
 
                     if isinstance(result, str):
                         return ActionResult(extracted_content=result)
@@ -217,6 +297,7 @@ class CustomController(Controller):
             return ActionResult()
         except Exception as e:
             raise e
+            
     async def setup_mcp_client(self, mcp_server_config: Optional[Dict[str, Any]] = None):
         self.mcp_server_config = mcp_server_config
         if self.mcp_server_config:
@@ -309,9 +390,13 @@ async def run_agent_task(prompt: str):
         if mcp_server_config:
             await controller.setup_mcp_client(mcp_server_config)
 
+        # Simple enhanced prompt that combines user input with concise guidance
+        enhanced_prompt = f"Task: {prompt}"
+
         agent = Agent(
-            task=prompt,
+            task=enhanced_prompt,  # Use the enhanced prompt here
             llm=ChatGoogle(model="gemini-2.0-flash", api_key=os.getenv("GOOGLE_API_KEY")),
+            planner = ChatGoogle(model="gemini-2.0-flash", api_key=os.getenv("GOOGLE_API_KEY")),
             browser_session=browser_session,
             controller=controller,
             max_steps=100
