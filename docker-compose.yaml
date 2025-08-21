@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./app_static:/app/static
+    environment:
+      - PYTHONUNBUFFERED=1
+      - BROWSER_USE_CONFIG_DIR=/app/.config/browseruse
+      - HOME=/home/appuser
+    env_file:
+      - .env
+    # Remove the user override since we handle it in Dockerfile
+    # user: "1000:1000"
