@@ -8,17 +8,29 @@ from browser_use.agent.views import ActionResult, ActionModel
 from browser_use.browser.context import BrowserContext
 from browser_use.controller.registry.service import RegisteredAction
 from browser_use.controller.service import Controller
+from browser_use.config import CONFIG
+from langchain_core.language_models import BaseChatModel
 from utils.mcp_client import create_tool_param_model, setup_mcp_client_and_tools
+from tools.browser_use_tool import BrowserUseTool
 
 logger = logging.getLogger(__name__)
 Context = TypeVar("Context")
+
+
+def time_execution_sync(label):
+    """Decorator for timing function execution (sync version from first file)"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 class CustomController(Controller):
     """
     Custom Controller that extends the base Controller
     to support extra actions (ask assistant, file upload),
-    and dynamic MCP tool registration.
+    BrowserUseTool integration, and dynamic MCP tool registration.
     """
 
     def __init__(
@@ -35,6 +47,11 @@ class CustomController(Controller):
         super().__init__(exclude_actions=exclude_actions, output_model=output_model)
         self._register_custom_actions()
         self.ask_assistant_callback = ask_assistant_callback
+        
+        # Initialize BrowserUseTool (from first file)
+        self.browser_tool = BrowserUseTool()
+        
+        # Initialize MCP client attributes
         self.mcp_client = None
         self.mcp_server_config = None
 
@@ -95,51 +112,97 @@ class CustomController(Controller):
                 logger.info(msg)
                 return ActionResult(error=msg)
 
+    @time_execution_sync('--act')
     async def act(
         self,
         action: ActionModel,
         browser_context: Optional[BrowserContext] = None,
-        page_extraction_llm: Optional[BaseModel] = None,
+        page_extraction_llm: Optional[BaseChatModel] = None,
         sensitive_data: Optional[Dict[str, str]] = None,
         available_file_paths: Optional[list[str]] = None,
         context: Context | None = None,
         browser_session: Any = None,
         file_system: Any = None,
     ) -> ActionResult:
-        """Execute actions with registry and return results."""
+        """Execute actions with BrowserUseTool integration and registry fallback."""
         try:
-            for action_name, params in action.model_dump(exclude_unset=True).items():
-                if params is not None:
-                    result = await self.registry.execute_action(
-                        action_name,
-                        params,
-                        browser_session=browser_session,
-                        page_extraction_llm=page_extraction_llm,
-                        file_system=file_system,
-                        sensitive_data=sensitive_data,
-                        available_file_paths=available_file_paths,
-                        context=context,
-                    )
+            # Extract action_name and params from action (BrowserUseTool integration from first file)
+            action_dict = action.model_dump(exclude_unset=True)
+            if action_dict:
+                action_name = next(iter(action_dict))
+                params = action_dict[action_name]
 
-                    if isinstance(result, str):
-                        return ActionResult(extracted_content=result)
-                    if isinstance(result, ActionResult):
-                        return result
-                    if result is None:
-                        return ActionResult()
-                    raise ValueError(
-                        f'Invalid action result type: {type(result)} of {result}'
-                    )
+                # Try to route through BrowserUseTool first
+                try:
+                    tool_result = await self.browser_tool.execute(action=action_name, **params)
+
+                    # Convert ToolResult to ActionResult
+                    if tool_result.error:
+                        return ActionResult(error=tool_result.error)
+                    else:
+                        # Optionally get updated state
+                        state_result = await self.browser_tool.get_current_state()
+                        extracted = tool_result.output + "\nCurrent State: " + state_result.output
+                        return ActionResult(
+                            extracted_content=extracted, 
+                            base64_image=state_result.base64_image
+                        )
+                except Exception as browser_tool_error:
+                    logger.warning(f"BrowserUseTool failed for {action_name}: {browser_tool_error}")
+                    # Fall back to registry execution
+                    pass
+
+                # Fallback to original registry-based execution
+                for action_name_fallback, params_fallback in action_dict.items():
+                    if params_fallback is not None:
+                        result = await self.registry.execute_action(
+                            action_name_fallback,
+                            params_fallback,
+                            browser_session=browser_session,
+                            page_extraction_llm=page_extraction_llm,
+                            file_system=file_system,
+                            sensitive_data=sensitive_data,
+                            available_file_paths=available_file_paths,
+                            context=context,
+                        )
+
+                        if isinstance(result, str):
+                            return ActionResult(extracted_content=result)
+                        if isinstance(result, ActionResult):
+                            return result
+                        if result is None:
+                            return ActionResult()
+                        raise ValueError(
+                            f'Invalid action result type: {type(result)} of {result}'
+                        )
             return ActionResult()
         except Exception as e:
-            raise e
+            logger.error(f"Error in act method: {e}")
+            return ActionResult(error=str(e))
+
+    async def close_browser_tool(self):
+        """Clean up the browser tool properly (from first file)"""
+        if hasattr(self, 'browser_tool') and self.browser_tool:
+            try:
+                await self.browser_tool.cleanup()
+                logger.info("BrowserUseTool cleaned up successfully")
+            except Exception as e:
+                logger.warning(f"Error cleaning up BrowserUseTool: {e}")
 
     async def setup_mcp_client(self, mcp_server_config: Optional[Dict[str, Any]] = None):
-        """Initialize MCP client and register tools."""
-        self.mcp_server_config = mcp_server_config
-        if self.mcp_server_config:
-            self.mcp_client = await setup_mcp_client_and_tools(self.mcp_server_config)
-            self.register_mcp_tools()
+        """Initialize MCP client and register tools with proper error handling."""
+        try:
+            self.mcp_server_config = mcp_server_config
+            if self.mcp_server_config:
+                self.mcp_client, self.mcp_server_config = await setup_mcp_client_and_tools(
+                    self.mcp_server_config
+                )
+                self.register_mcp_tools()
+                logger.info("MCP client setup completed successfully")
+        except Exception as e:
+            logger.warning(f"Error setting up MCP client: {e}")
+            self.mcp_client = None
+            self.mcp_server_config = None
 
     def register_mcp_tools(self):
         """Register the MCP tools used by this controller."""
@@ -163,6 +226,14 @@ class CustomController(Controller):
             )
 
     async def close_mcp_client(self):
-        """Gracefully close MCP client connection."""
+        """Clean up MCP client and browser tool (enhanced from first file)"""
+        # Clean up browser tool first
+        await self.close_browser_tool()
+        
+        # Then clean up MCP client
         if self.mcp_client:
-            await self.mcp_client.__aexit__(None, None, None)
+            try:
+                await self.mcp_client.__aexit__(None, None, None)
+                logger.info("MCP client cleaned up successfully")
+            except Exception as e:
+                logger.warning(f"Error cleaning up MCP client: {e}")
