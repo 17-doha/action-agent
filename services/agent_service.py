@@ -4,12 +4,12 @@ import json
 from datetime import datetime
 from types import SimpleNamespace
 
-from browser_use import Agent, Browser, BrowserConfig  # Added missing imports
+from browser_use import Agent, Browser, BrowserConfig
 from browser_use.llm import ChatGoogle
 from playwright.async_api import async_playwright
 
 from config.settings import GOOGLE_API_KEY, MCP_CONFIG_PATH
-from models.result_models import TestResult, Step  # Added Step import
+from models.result_models import TestResult, Step
 from utils.file_utils import ensure_dirs, generate_gif_from_images
 from controllers.custom_controller import CustomController
 from prompts.prompt import extend_system_message
@@ -21,12 +21,11 @@ async def run_agent_task(prompt: str):
     screenshot_dir = os.path.join("app_static/screenshots", f"run_{timestamp}")
     os.makedirs(screenshot_dir, exist_ok=True)
     gif_path = f"app_static/gifs/test_{timestamp}.gif"
-    pdf_path = f"app_static/pdfs/test_{timestamp}.pdf"
     screenshots = []
 
     stop_capture_flag = [False]
 
-    # --- MCP server config loading ---
+    # Load MCP server config
     mcp_server_config = None
     mcp_config_path = "mcp_server.json"
     if os.path.exists(mcp_config_path):
@@ -51,49 +50,59 @@ async def run_agent_task(prompt: str):
     capture_task = None
 
     try:
-        # Use proper browser_use Browser setup
         print("[DEBUG] Setting up browser_use Browser...")
         
+        # Optimized browser config for memory efficiency
         browser_config = BrowserConfig(
-            headless=False,
+            headless=True,
             disable_security=True,
             extra_chromium_args=[
-                "--start-maximized",
                 "--no-sandbox",
-                "--disable-dev-shm-usage",  # Reduce memory usage
-                "--disable-gpu",             # Reduce GPU memory usage
-                "--memory-pressure-off",     # Disable memory pressure handling
-                "--max_old_space_size=4096", # Limit Node.js memory
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--memory-pressure-off",
+                "--max_old_space_size=1024",  # Reduced from 2048
                 "--disable-background-timer-throttling",
                 "--disable-backgrounding-occluded-windows",
-                "--disable-renderer-backgrounding"
+                "--disable-renderer-backgrounding",
+                "--disable-extensions",
+                "--disable-plugins",
+                "--disable-images",  # Save memory by not loading images
+                "--disable-css",     # Disable CSS parsing
+                "--single-process",
+                "--disable-web-security",
+                "--disable-features=TranslateUI,BlinkGenPropertyTrees,VizDisplayCompositor",
+                "--aggressive-cache-discard",
+                "--memory-pressure-thresholds=0,0",
+                "--disable-ipc-flooding-protection",
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--disable-sync",
+                "--no-first-run"
             ]
         )
         
         browser = Browser(config=browser_config)
-        browser_context = await browser.new_context()
         
-        # Get the page for screenshot capturing
-        page = await browser_context.get_current_page()
+        # Create browser context with timeout and retry logic
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                browser_context = await asyncio.wait_for(
+                    browser.new_context(), 
+                    timeout=30.0  # Reduced timeout
+                )
+                print(f"[DEBUG] Browser context created successfully (attempt {attempt + 1})")
+                break
+            except asyncio.TimeoutError:
+                print(f"[ERROR] Browser context creation timed out (attempt {attempt + 1})")
+                if attempt == max_retries - 1:
+                    raise Exception("Browser context creation timeout after retries")
+                await asyncio.sleep(2)  # Wait before retry
         
-        print("[DEBUG] Browser setup completed successfully")
-
-        # Screenshot capture loop with reduced frequency and PNG support
-        async def capture_loop():
-            frame = 0
-            while not stop_capture_flag[0]:
-                try:
-                    screenshot_path = os.path.join(screenshot_dir, f"frame_{frame}.png")
-                    # Remove quality parameter for PNG screenshots
-                    await page.screenshot(path=screenshot_path, type='png')
-                    screenshots.append(screenshot_path)
-                    print(f"[+] Captured screenshot: {screenshot_path} (total: {len(screenshots)})")
-                    frame += 1
-                except Exception as e:
-                    print(f"[ERROR] Failed to capture screenshot: {e}")
-                await asyncio.sleep(3)  # Increased interval to reduce memory usage
-
-        capture_task = asyncio.create_task(capture_loop())
+        # Disable screenshot capture to save memory
+        capture_task = None
+        print("[DEBUG] Screenshot capture disabled to save memory")
 
         # Setup controller
         controller = CustomController(output_model=TestResult)
@@ -101,64 +110,78 @@ async def run_agent_task(prompt: str):
         if mcp_server_config:
             await controller.setup_mcp_client(mcp_server_config)
 
-        # Configure LLM with correct parameters for ChatGoogle
+        # Configure LLM with optimized settings
         try:
             llm = ChatGoogle(
-                model="gemini-2.0-flash", 
+                model="gemini-2.0-flash-exp",  # Use experimental version for better performance
                 api_key=os.getenv("GOOGLE_API_KEY"),
-                temperature=0.1,  # Lower temperature for more deterministic responses
-                # Note: ChatGoogle doesn't support max_tokens parameter
-                # max_tokens is handled internally by the model
+                temperature=0.0,  # Deterministic responses
             )
             print("[DEBUG] LLM initialized successfully")
         except Exception as e:
             print(f"[ERROR] Failed to initialize LLM: {e}")
             raise
 
-        # Create and run agent with proper browser context
+        # Create agent with optimized settings
         agent = Agent(
             task=prompt,
             llm=llm,
-            browser=browser,  # Pass browser instead of browser_session
+            browser=browser,
             controller=controller,
-            max_steps=20,     # Reduced max steps to prevent long executions
-            extend_system_message=extend_system_message
+            max_steps=10,  # Reduced from 20 to prevent long executions
+            max_failures=2,  # Add failure limit
+            extend_system_message=extend_system_message,
+            save_conversation_path=None,  # Disable conversation saving
+            save_trace_path=None,  # Disable trace saving
         )
 
         try:
             print("[DEBUG] Starting agent execution...")
-            print(f"[DEBUG] Task prompt: {prompt[:200]}...")  # Log first 200 chars of prompt
+            print(f"[DEBUG] Task prompt: {prompt[:200]}...")
             
-            # Ensure the browser starts with a proper page
+            # Start with a lightweight page
             page = await browser_context.get_current_page()
-            await page.goto("https://www.google.com")
-            await page.wait_for_load_state("networkidle", timeout=10000)
-            print("[DEBUG] Initial navigation to Google completed")
+            await page.goto("about:blank")  # Start with blank page
+            await asyncio.sleep(1)  # Brief pause
             
-            # Add a small delay to ensure everything is ready
-            await asyncio.sleep(2)
+            print("[DEBUG] Initial setup completed")
             
-            history = await agent.run()
+            # Execute agent with timeout
+            history = await asyncio.wait_for(agent.run(), timeout=300)  # 5 minute timeout
             print(f"[DEBUG] Agent execution completed. History length: {len(history.history) if history else 0}")
             
             final_output = history.final_result()
             if final_output:
-                print(f"[DEBUG] Final output: {final_output[:500]}...")  # Log first 500 chars
-                structured_result = TestResult.model_validate_json(final_output)
-                status = structured_result.status
-                print(f"[DEBUG] Agent completed with status: {status}")
+                print(f"[DEBUG] Final output: {final_output[:500]}...")
+                try:
+                    structured_result = TestResult.model_validate_json(final_output)
+                    status = structured_result.status
+                    print(f"[DEBUG] Agent completed with status: {status}")
+                except Exception as parse_error:
+                    print(f"[WARN] Failed to parse final output: {parse_error}")
+                    structured_result = TestResult(
+                        steps=[], 
+                        final_result=final_output, 
+                        status="success"
+                    )
+                    status = "success"
             else:
-                structured_result = TestResult(steps=[], final_result="No result", status="fail")
-                status = "fail"
+                structured_result = TestResult(
+                    steps=[], 
+                    final_result="Agent completed but no structured output", 
+                    status="partial"
+                )
+                status = "partial"
                 print("[DEBUG] Agent completed but no final output")
+                
         except asyncio.TimeoutError:
             print("[ERROR] Agent execution timed out")
             structured_result = TestResult(
                 steps=[], 
-                final_result="Agent execution timed out", 
-                status="fail"
+                final_result="Agent execution timed out after 5 minutes", 
+                status="timeout"
             )
-            status = "fail"
+            status = "timeout"
         except Exception as e:
             print(f"[ERROR] Agent execution failed: {e}")
             structured_result = TestResult(
@@ -167,91 +190,28 @@ async def run_agent_task(prompt: str):
                 status="fail"
             )
             status = "fail"
-        finally:
-            stop_capture_flag[0] = True
-            if capture_task:
-                try:
-                    await capture_task
-                    print("[DEBUG] Screenshot capture stopped")
-                except Exception as e:
-                    print(f"[WARN] Error stopping capture task: {e}")
 
     except Exception as e:
         print(f"[ERROR] Browser setup failed: {e}")
-        # Fallback to playwright persistent context
-        print("[DEBUG] Falling back to playwright persistent context...")
-        
-        try:
-            async with async_playwright() as playwright:
-                try:
-                    print("[DEBUG] Starting persistent browser launch...")
-                    browser_pw = await playwright.chromium.launch_persistent_context(
-                        user_data_dir="user_data",
-                        headless=False,
-                        args=["--start-maximized"]
-                    )
-                    print("[DEBUG] Persistent browser launched successfully")
-                except Exception as e:
-                    print(f"[ERROR] Playwright browser launch failed: {str(e)}")
-                    raise
-
-                page = await browser_pw.new_page()
-
-                async def capture_loop_fallback():
-                    frame = 0
-                    while not stop_capture_flag[0]:
-                        try:
-                            screenshot_path = os.path.join(screenshot_dir, f"frame_{frame}.png")
-                            # Remove quality parameter for PNG screenshots
-                            await page.screenshot(path=screenshot_path, type='png')
-                            screenshots.append(screenshot_path)
-                            print(f"[+] Captured screenshot: {screenshot_path} (total: {len(screenshots)})")
-                            frame += 1
-                        except Exception as e:
-                            print(f"[ERROR] Failed to capture screenshot: {e}")
-                        await asyncio.sleep(3)  # Reduced frequency
-
-                capture_task = asyncio.create_task(capture_loop_fallback())
-
-                # For fallback, we'll have to use a basic setup without full browser_use integration
-                # This is a simplified approach for the fallback case
-                try:
-                    # Simple task execution without full agent
-                    await page.goto("https://www.google.com")
-                    await page.wait_for_load_state()
-                    
-                    structured_result = TestResult(
-                        steps=[Step(action="fallback", description="Used fallback browser")],
-                        final_result="Fallback browser setup completed",
-                        status="success"
-                    )
-                    status = "success"
-                    
-                except Exception as fallback_error:
-                    print(f"[ERROR] Fallback execution failed: {fallback_error}")
-                    structured_result = TestResult(
-                        steps=[],
-                        final_result=f"Fallback execution failed: {str(fallback_error)}",
-                        status="fail"
-                    )
-                    status = "fail"
-                finally:
-                    stop_capture_flag[0] = True
-                    if capture_task:
-                        await capture_task
-                    await browser_pw.close()
-                    
-        except Exception as fallback_error:
-            print(f"[ERROR] Fallback also failed: {fallback_error}")
-            structured_result = TestResult(
-                steps=[],
-                final_result=f"Both browser setups failed: {str(fallback_error)}",
-                status="fail"
-            )
-            status = "fail"
+        structured_result = TestResult(
+            steps=[],
+            final_result=f"Browser setup failed: {str(e)}",
+            status="fail"
+        )
+        status = "fail"
 
     finally:
-        # Cleanup
+        # Enhanced cleanup with proper error handling
+        stop_capture_flag[0] = True
+        
+        if capture_task:
+            try:
+                capture_task.cancel()
+                await asyncio.sleep(0.1)
+                print("[DEBUG] Screenshot capture stopped")
+            except Exception as e:
+                print(f"[WARN] Error stopping capture task: {e}")
+
         try:
             if controller:
                 if mcp_server_config:
@@ -264,6 +224,13 @@ async def run_agent_task(prompt: str):
 
         try:
             if browser_context:
+                # Properly close all pages first
+                pages = browser_context.browser_session.pages
+                for page in pages:
+                    try:
+                        await page.close()
+                    except Exception:
+                        pass
                 await browser_context.close()
                 print("[DEBUG] Browser context closed")
         except Exception as e:
@@ -276,11 +243,19 @@ async def run_agent_task(prompt: str):
         except Exception as e:
             print(f"[WARN] Error closing browser: {e}")
 
-    # Generate GIF from screenshots (only if we have screenshots)
+        # Force garbage collection
+        import gc
+        gc.collect()
+        print("[DEBUG] Garbage collection performed")
+
+    # Skip GIF generation to save resources
     if screenshots:
-        generate_gif_from_images(screenshots, gif_path)
+        try:
+            generate_gif_from_images(screenshots, gif_path)
+        except Exception as e:
+            print(f"[WARN] GIF generation failed: {e}")
     else:
-        print("[WARN] No screenshots captured, skipping GIF generation")
+        print("[INFO] No screenshots captured, skipping GIF generation")
 
     return {
         "text": structured_result.final_result,

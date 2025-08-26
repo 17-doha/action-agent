@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 from typing import Generic, Optional, TypeVar
+import logging
 
 from browser_use import Browser as BrowserUseBrowser
 from browser_use import BrowserConfig
@@ -14,6 +15,7 @@ from .utilities.config import config
 from tools.utilities.llm import LLM
 from tools.utilities.base import BaseTool, ToolResult
 
+logger = logging.getLogger(__name__)
 
 _BROWSER_DESCRIPTION = """\
 A powerful browser automation tool that allows interaction with web pages through various actions.
@@ -124,6 +126,7 @@ class BrowserUseTool(BaseTool, Generic[Context]):
     browser: Optional[BrowserUseBrowser] = Field(default=None, exclude=True)
     context: Optional[BrowserContext] = Field(default=None, exclude=True)
     dom_service: Optional[DomService] = Field(default=None, exclude=True)
+    cleanup_in_progress: bool = Field(default=False, exclude=True)
 
     # Context for generic functionality
     tool_context: Optional[Context] = Field(default=None, exclude=True)
@@ -138,13 +141,33 @@ class BrowserUseTool(BaseTool, Generic[Context]):
 
     async def _ensure_browser_initialized(self) -> BrowserContext:
         """Ensure browser and context are initialized."""
+        if self.cleanup_in_progress:
+            raise Exception("Browser is being cleaned up")
+            
         if self.browser is None:
-            browser_config_kwargs = {"headless": False, "disable_security": True}
+            browser_config_kwargs = {
+                "headless": True,  # Always use headless for stability
+                "disable_security": True,
+                "extra_chromium_args": [
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--memory-pressure-off",
+                    "--max_old_space_size=1024",
+                    "--single-process",
+                    "--disable-web-security",
+                    "--disable-extensions",
+                    "--disable-plugins",
+                    "--disable-images",
+                    "--no-first-run",
+                    "--disable-default-apps",
+                ]
+            }
 
             if config.browser_config:
                 from browser_use.browser.browser import ProxySettings
 
-                # handle proxy settings.
+                # Handle proxy settings
                 if config.browser_config.proxy and config.browser_config.proxy.server:
                     browser_config_kwargs["proxy"] = ProxySettings(
                         server=config.browser_config.proxy.server,
@@ -154,7 +177,7 @@ class BrowserUseTool(BaseTool, Generic[Context]):
 
                 browser_attrs = [
                     "headless",
-                    "disable_security",
+                    "disable_security", 
                     "extra_chromium_args",
                     "chrome_instance_path",
                     "wss_url",
@@ -172,7 +195,7 @@ class BrowserUseTool(BaseTool, Generic[Context]):
         if self.context is None:
             context_config = BrowserContextConfig()
 
-            # if there is context config in the config, use it.
+            # If there is context config in the config, use it
             if (
                 config.browser_config
                 and hasattr(config.browser_config, "new_context_config")
@@ -199,28 +222,17 @@ class BrowserUseTool(BaseTool, Generic[Context]):
         seconds: Optional[int] = None,
         **kwargs,
     ) -> ToolResult:
-        """
-        Execute a specified browser action.
-
-        Args:
-            action: The browser action to perform
-            url: URL for navigation or new tab
-            index: Element index for click or input actions
-            text: Text for input action or search query
-            scroll_amount: Pixels to scroll for scroll action
-            tab_id: Tab ID for switch_tab action
-            query: Search query for Google search
-            goal: Extraction goal for content extraction
-            keys: Keys to send for keyboard actions
-            seconds: Seconds to wait
-            **kwargs: Additional arguments
-
-        Returns:
-            ToolResult with the action's output or error
-        """
+        """Execute a specified browser action with proper error handling."""
         async with self.lock:
             try:
-                context = await self._ensure_browser_initialized()
+                if self.cleanup_in_progress:
+                    return ToolResult(error="Browser tool is being cleaned up")
+
+                # Add timeout for all operations
+                context = await asyncio.wait_for(
+                    self._ensure_browser_initialized(), 
+                    timeout=30.0
+                )
 
                 # Get max content length from config
                 max_content_length = getattr(
@@ -234,36 +246,47 @@ class BrowserUseTool(BaseTool, Generic[Context]):
                             error="URL is required for 'go_to_url' action"
                         )
                     page = await context.get_current_page()
-                    await page.goto(url)
-                    await page.wait_for_load_state()
-                    return ToolResult(output=f"Navigated to {url}")
+                    try:
+                        await asyncio.wait_for(page.goto(url), timeout=30.0)
+                        await asyncio.wait_for(page.wait_for_load_state("domcontentloaded"), timeout=15.0)
+                        return ToolResult(output=f"Navigated to {url}")
+                    except asyncio.TimeoutError:
+                        return ToolResult(error=f"Navigation to {url} timed out")
 
                 elif action == "go_back":
-                    await context.go_back()
-                    return ToolResult(output="Navigated back")
+                    try:
+                        await asyncio.wait_for(context.go_back(), timeout=10.0)
+                        return ToolResult(output="Navigated back")
+                    except asyncio.TimeoutError:
+                        return ToolResult(error="Go back operation timed out")
 
                 elif action == "refresh":
-                    await context.refresh_page()
-                    return ToolResult(output="Refreshed current page")
+                    try:
+                        await asyncio.wait_for(context.refresh_page(), timeout=15.0)
+                        return ToolResult(output="Refreshed current page")
+                    except asyncio.TimeoutError:
+                        return ToolResult(error="Page refresh timed out")
 
                 elif action == "web_search":
                     if not query:
                         return ToolResult(
                             error="Query is required for 'web_search' action"
                         )
-                    # Execute the web search and return results directly without browser navigation
-                    search_response = await self.web_search_tool.execute(
-                        query=query, fetch_content=True, num_results=1
-                    )
-                    # Navigate to the first search result
-                    first_search_result = search_response.results[0]
-                    url_to_navigate = first_search_result.url
-
+                    # Navigate to Google and perform search
                     page = await context.get_current_page()
-                    await page.goto(url_to_navigate)
-                    await page.wait_for_load_state()
-
-                    return search_response
+                    try:
+                        await asyncio.wait_for(page.goto("https://www.google.com"), timeout=30.0)
+                        await asyncio.wait_for(page.wait_for_load_state("domcontentloaded"), timeout=15.0)
+                        
+                        # Wait for search box and enter query
+                        search_box = await page.wait_for_selector('input[name="q"]', timeout=10000)
+                        await search_box.fill(query)
+                        await search_box.press('Enter')
+                        await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                        
+                        return ToolResult(output=f"Performed web search for: {query}")
+                    except asyncio.TimeoutError:
+                        return ToolResult(error="Web search timed out")
 
                 # Element interaction actions
                 elif action == "click_element":
@@ -271,41 +294,68 @@ class BrowserUseTool(BaseTool, Generic[Context]):
                         return ToolResult(
                             error="Index is required for 'click_element' action"
                         )
-                    element = await context.get_dom_element_by_index(index)
-                    if not element:
-                        return ToolResult(error=f"Element with index {index} not found")
-                    download_path = await context._click_element_node(element)
-                    output = f"Clicked element at index {index}"
-                    if download_path:
-                        output += f" - Downloaded file to {download_path}"
-                    return ToolResult(output=output)
+                    try:
+                        element = await asyncio.wait_for(
+                            context.get_dom_element_by_index(index), 
+                            timeout=10.0
+                        )
+                        if not element:
+                            return ToolResult(error=f"Element with index {index} not found")
+                        
+                        download_path = await asyncio.wait_for(
+                            context._click_element_node(element), 
+                            timeout=10.0
+                        )
+                        output = f"Clicked element at index {index}"
+                        if download_path:
+                            output += f" - Downloaded file to {download_path}"
+                        return ToolResult(output=output)
+                    except asyncio.TimeoutError:
+                        return ToolResult(error=f"Click element {index} timed out")
 
                 elif action == "input_text":
                     if index is None or not text:
                         return ToolResult(
                             error="Index and text are required for 'input_text' action"
                         )
-                    element = await context.get_dom_element_by_index(index)
-                    if not element:
-                        return ToolResult(error=f"Element with index {index} not found")
-                    await context._input_text_element_node(element, text)
-                    return ToolResult(
-                        output=f"Input '{text}' into element at index {index}"
-                    )
+                    try:
+                        element = await asyncio.wait_for(
+                            context.get_dom_element_by_index(index), 
+                            timeout=10.0
+                        )
+                        if not element:
+                            return ToolResult(error=f"Element with index {index} not found")
+                        
+                        await asyncio.wait_for(
+                            context._input_text_element_node(element, text), 
+                            timeout=10.0
+                        )
+                        return ToolResult(
+                            output=f"Input '{text}' into element at index {index}"
+                        )
+                    except asyncio.TimeoutError:
+                        return ToolResult(error=f"Input text to element {index} timed out")
 
+                # Scroll actions
                 elif action == "scroll_down" or action == "scroll_up":
                     direction = 1 if action == "scroll_down" else -1
                     amount = (
                         scroll_amount
                         if scroll_amount is not None
-                        else context.config.browser_window_size["height"]
+                        else context.config.browser_window_size.get("height", 800)
                     )
-                    await context.execute_javascript(
-                        f"window.scrollBy(0, {direction * amount});"
-                    )
-                    return ToolResult(
-                        output=f"Scrolled {'down' if direction > 0 else 'up'} by {amount} pixels"
-                    )
+                    try:
+                        await asyncio.wait_for(
+                            context.execute_javascript(
+                                f"window.scrollBy(0, {direction * amount});"
+                            ),
+                            timeout=5.0
+                        )
+                        return ToolResult(
+                            output=f"Scrolled {'down' if direction > 0 else 'up'} by {amount} pixels"
+                        )
+                    except asyncio.TimeoutError:
+                        return ToolResult(error="Scroll operation timed out")
 
                 elif action == "scroll_to_text":
                     if not text:
@@ -315,179 +365,45 @@ class BrowserUseTool(BaseTool, Generic[Context]):
                     page = await context.get_current_page()
                     try:
                         locator = page.get_by_text(text, exact=False)
-                        await locator.scroll_into_view_if_needed()
+                        await asyncio.wait_for(
+                            locator.scroll_into_view_if_needed(), 
+                            timeout=10.0
+                        )
                         return ToolResult(output=f"Scrolled to text: '{text}'")
+                    except asyncio.TimeoutError:
+                        return ToolResult(error=f"Scroll to text '{text}' timed out")
                     except Exception as e:
                         return ToolResult(error=f"Failed to scroll to text: {str(e)}")
 
-                elif action == "send_keys":
-                    if not keys:
-                        return ToolResult(
-                            error="Keys are required for 'send_keys' action"
-                        )
-                    page = await context.get_current_page()
-                    await page.keyboard.press(keys)
-                    return ToolResult(output=f"Sent keys: {keys}")
-
-                elif action == "get_dropdown_options":
-                    if index is None:
-                        return ToolResult(
-                            error="Index is required for 'get_dropdown_options' action"
-                        )
-                    element = await context.get_dom_element_by_index(index)
-                    if not element:
-                        return ToolResult(error=f"Element with index {index} not found")
-                    page = await context.get_current_page()
-                    options = await page.evaluate(
-                        """
-                        (xpath) => {
-                            const select = document.evaluate(xpath, document, null,
-                                XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                            if (!select) return null;
-                            return Array.from(select.options).map(opt => ({
-                                text: opt.text,
-                                value: opt.value,
-                                index: opt.index
-                            }));
-                        }
-                    """,
-                        element.xpath,
-                    )
-                    return ToolResult(output=f"Dropdown options: {options}")
-
-                elif action == "select_dropdown_option":
-                    if index is None or not text:
-                        return ToolResult(
-                            error="Index and text are required for 'select_dropdown_option' action"
-                        )
-                    element = await context.get_dom_element_by_index(index)
-                    if not element:
-                        return ToolResult(error=f"Element with index {index} not found")
-                    page = await context.get_current_page()
-                    await page.select_option(element.xpath, label=text)
-                    return ToolResult(
-                        output=f"Selected option '{text}' from dropdown at index {index}"
-                    )
-
-                # Content extraction actions
-                elif action == "extract_content":
-                    if not goal:
-                        return ToolResult(
-                            error="Goal is required for 'extract_content' action"
-                        )
-
-                    page = await context.get_current_page()
-                    import markdownify
-
-                    content = markdownify.markdownify(await page.content())
-
-                    prompt = f"""\
-Your task is to extract the content of the page. You will be given a page and a goal, and you should extract all relevant information around this goal from the page. If the goal is vague, summarize the page. Respond in json format.
-Extraction goal: {goal}
-
-Page content:
-{content[:max_content_length]}
-"""
-                    messages = [{"role": "system", "content": prompt}]
-
-                    # Define extraction function schema
-                    extraction_function = {
-                        "type": "function",
-                        "function": {
-                            "name": "extract_content",
-                            "description": "Extract specific information from a webpage based on a goal",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "extracted_content": {
-                                        "type": "object",
-                                        "description": "The content extracted from the page according to the goal",
-                                        "properties": {
-                                            "text": {
-                                                "type": "string",
-                                                "description": "Text content extracted from the page",
-                                            },
-                                            "metadata": {
-                                                "type": "object",
-                                                "description": "Additional metadata about the extracted content",
-                                                "properties": {
-                                                    "source": {
-                                                        "type": "string",
-                                                        "description": "Source of the extracted content",
-                                                    }
-                                                },
-                                            },
-                                        },
-                                    }
-                                },
-                                "required": ["extracted_content"],
-                            },
-                        },
-                    }
-
-                    # Use LLM to extract content with required function calling
-                    response = await self.llm.ask_tool(
-                        messages,
-                        tools=[extraction_function],
-                        tool_choice="required",
-                    )
-
-                    if response and response.tool_calls:
-                        args = json.loads(response.tool_calls[0].function.arguments)
-                        extracted_content = args.get("extracted_content", {})
-                        return ToolResult(
-                            output=f"Extracted from page:\n{extracted_content}\n"
-                        )
-
-                    return ToolResult(output="No content was extracted from the page.")
-
-                # Tab management actions
-                elif action == "switch_tab":
-                    if tab_id is None:
-                        return ToolResult(
-                            error="Tab ID is required for 'switch_tab' action"
-                        )
-                    await context.switch_to_tab(tab_id)
-                    page = await context.get_current_page()
-                    await page.wait_for_load_state()
-                    return ToolResult(output=f"Switched to tab {tab_id}")
-
-                elif action == "open_tab":
-                    if not url:
-                        return ToolResult(error="URL is required for 'open_tab' action")
-                    await context.create_new_tab(url)
-                    return ToolResult(output=f"Opened new tab with {url}")
-
-                elif action == "close_tab":
-                    await context.close_current_tab()
-                    return ToolResult(output="Closed current tab")
-
                 # Utility actions
                 elif action == "wait":
-                    seconds_to_wait = seconds if seconds is not None else 3
+                    seconds_to_wait = min(seconds if seconds is not None else 3, 10)  # Max 10 seconds
                     await asyncio.sleep(seconds_to_wait)
                     return ToolResult(output=f"Waited for {seconds_to_wait} seconds")
 
                 else:
                     return ToolResult(error=f"Unknown action: {action}")
 
+            except asyncio.TimeoutError:
+                return ToolResult(error=f"Browser action '{action}' timed out")
             except Exception as e:
+                logger.error(f"Browser action '{action}' failed: {str(e)}")
                 return ToolResult(error=f"Browser action '{action}' failed: {str(e)}")
 
     async def get_current_state(
         self, context: Optional[BrowserContext] = None
     ) -> ToolResult:
-        """
-        Get the current browser state as a ToolResult.
-        If context is not provided, uses self.context.
-        """
+        """Get the current browser state as a ToolResult with timeout protection."""
         try:
+            if self.cleanup_in_progress:
+                return ToolResult(error="Browser tool is being cleaned up")
+
             # Use provided context or fall back to self.context
             ctx = context or self.context
             if not ctx:
                 return ToolResult(error="Browser context not initialized")
 
-            state = await ctx.get_state()
+            state = await asyncio.wait_for(ctx.get_state(), timeout=15.0)
 
             # Create a viewport_info dictionary if it doesn't exist
             viewport_height = 0
@@ -496,14 +412,18 @@ Page content:
             elif hasattr(ctx, "config") and hasattr(ctx.config, "browser_window_size"):
                 viewport_height = ctx.config.browser_window_size.get("height", 0)
 
-            # Take a screenshot for the state
+            # Take a lightweight screenshot
             page = await ctx.get_current_page()
-
             await page.bring_to_front()
-            await page.wait_for_load_state()
 
-            screenshot = await page.screenshot(
-                full_page=True, animations="disabled", type="jpeg", quality=100
+            screenshot = await asyncio.wait_for(
+                page.screenshot(
+                    full_page=False,  # Only viewport to save memory
+                    animations="disabled", 
+                    type="jpeg", 
+                    quality=70  # Reduced quality
+                ), 
+                timeout=10.0
             )
 
             screenshot = base64.b64encode(screenshot).decode("utf-8")
@@ -513,9 +433,9 @@ Page content:
                 "url": state.url,
                 "title": state.title,
                 "tabs": [tab.model_dump() for tab in state.tabs],
-                "help": "[0], [1], [2], etc., represent clickable indices corresponding to the elements listed. Clicking on these indices will navigate to or interact with the respective content behind them.",
+                "help": "[0], [1], [2], etc., represent clickable indices corresponding to the elements listed.",
                 "interactive_elements": (
-                    state.element_tree.clickable_elements_to_string()
+                    state.element_tree.clickable_elements_to_string()[:1000]  # Truncate to save memory
                     if state.element_tree
                     else ""
                 ),
@@ -530,32 +450,83 @@ Page content:
             }
 
             return ToolResult(
-                output=json.dumps(state_info, indent=4, ensure_ascii=False),
+                output=json.dumps(state_info, indent=2, ensure_ascii=False),
                 base64_image=screenshot,
             )
+        except asyncio.TimeoutError:
+            return ToolResult(error="Get browser state timed out")
         except Exception as e:
+            logger.error(f"Failed to get browser state: {str(e)}")
             return ToolResult(error=f"Failed to get browser state: {str(e)}")
 
     async def cleanup(self):
-        """Clean up browser resources."""
+        """Clean up browser resources with proper error handling."""
+        if self.cleanup_in_progress:
+            return
+            
+        self.cleanup_in_progress = True
+        
         async with self.lock:
-            if self.context is not None:
-                await self.context.close()
-                self.context = None
-                self.dom_service = None
-            if self.browser is not None:
-                await self.browser.close()
-                self.browser = None
+            try:
+                # Clean up context first
+                if self.context is not None:
+                    try:
+                        # Close all pages first
+                        if hasattr(self.context, 'browser_session') and self.context.browser_session:
+                            pages = getattr(self.context.browser_session, 'pages', [])
+                            for page in pages:
+                                try:
+                                    await asyncio.wait_for(page.close(), timeout=5.0)
+                                except Exception as e:
+                                    logger.warning(f"Error closing page: {e}")
+                        
+                        await asyncio.wait_for(self.context.close(), timeout=10.0)
+                        logger.info("Browser context closed successfully")
+                    except asyncio.TimeoutError:
+                        logger.warning("Browser context close timed out")
+                    except Exception as e:
+                        logger.warning(f"Error closing browser context: {e}")
+                    finally:
+                        self.context = None
+                        self.dom_service = None
+
+                # Clean up browser
+                if self.browser is not None:
+                    try:
+                        await asyncio.wait_for(self.browser.close(), timeout=10.0)
+                        logger.info("Browser closed successfully")
+                    except asyncio.TimeoutError:
+                        logger.warning("Browser close timed out")
+                    except Exception as e:
+                        logger.warning(f"Error closing browser: {e}")
+                    finally:
+                        self.browser = None
+
+            except Exception as e:
+                logger.error(f"Error during browser cleanup: {e}")
+            finally:
+                self.cleanup_in_progress = False
 
     def __del__(self):
-        """Ensure cleanup when object is destroyed."""
-        if self.browser is not None or self.context is not None:
+        """Ensure cleanup when object is destroyed - with safe async handling."""
+        if not self.cleanup_in_progress and (self.browser is not None or self.context is not None):
             try:
-                asyncio.run(self.cleanup())
+                # Try to get current event loop
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # If loop is running, schedule cleanup
+                    loop.create_task(self.cleanup())
+                else:
+                    # If no loop is running, run cleanup in new loop
+                    loop.run_until_complete(self.cleanup())
             except RuntimeError:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(self.cleanup())
-                loop.close()
+                # If we can't access the event loop, create a new one
+                try:
+                    loop = asyncio.new_event_loop()
+                    loop.run_until_complete(self.cleanup())
+                    loop.close()
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup browser in __del__: {e}")
 
     @classmethod
     def create_with_context(cls, context: Context) -> "BrowserUseTool[Context]":
