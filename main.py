@@ -1,5 +1,6 @@
 import asyncio
 import os
+import json
 from datetime import datetime
 from dotenv import load_dotenv
 from PIL import Image
@@ -8,20 +9,17 @@ from browser_use import Agent, BrowserSession
 from browser_use.llm import ChatGoogle
 from playwright.async_api import async_playwright
 from pydantic import BaseModel, Field
-from typing import List
-import json
+from typing import List, Optional, Type, Callable, Dict, Any, Union, Awaitable, TypeVar
 from langchain_core.language_models import BaseChatModel
 from utils.mcp_client import create_tool_param_model, setup_mcp_client_and_tools
 
 import logging
 import inspect
-import pdb
-from typing import Optional, Type, Callable, Dict, Any, Union, Awaitable, TypeVar
 from browser_use.agent.views import ActionResult, ActionModel
 from browser_use.browser.context import BrowserContext
 from browser_use.controller.registry.service import RegisteredAction, Registry
 from browser_use.controller.service import Controller
-from custom_browser.custom_browser import CustomBrowser 
+from custom_browser.custom_browser import CustomBrowser
 from browser_use.config import CONFIG
 from types import SimpleNamespace
 from browser_use.controller.views import (
@@ -36,9 +34,11 @@ from browser_use.controller.views import (
     SwitchTabAction,
 )
 
+# NEW: publish frames to Flask stream
+from utils.stream import update_latest_jpeg
+
 logger = logging.getLogger(__name__)
 Context = TypeVar("Context")
-
 
 def time_execution_sync(label):
     def decorator(func):
@@ -50,7 +50,7 @@ def time_execution_sync(label):
 load_dotenv()
 
 class OpenTabAction(BaseModel):
-	url: str
+    url: str
 
 class Step(BaseModel):
     action: str = Field(description="The action taken in this step")
@@ -72,8 +72,7 @@ def ensure_dirs():
 def generate_gif_from_images(image_paths, output_path):
     images = []
     target_size = None
-    
-    # First pass: determine the target size (use the first valid image)
+
     for img_path in image_paths:
         if os.path.exists(img_path):
             try:
@@ -84,17 +83,15 @@ def generate_gif_from_images(image_paths, output_path):
             except Exception as e:
                 print(f"[!] Failed to open {img_path}: {e}")
                 continue
-    
+
     if target_size is None:
         print("[!] No valid images found to determine target size.")
         return
-    
-    # Second pass: resize all images to the target size
+
     for img_path in image_paths:
         if os.path.exists(img_path):
             try:
                 img = Image.open(img_path).convert("RGB")
-                # Resize image to target size if it doesn't match
                 if img.size != target_size:
                     img = img.resize(target_size, Image.Resampling.LANCZOS)
                     print(f"[→] Resized {img_path} from original size to {target_size}")
@@ -102,7 +99,7 @@ def generate_gif_from_images(image_paths, output_path):
             except Exception as e:
                 print(f"[!] Failed to process {img_path}: {e}")
                 continue
-    
+
     if len(images) >= 2:
         try:
             imageio.mimsave(output_path, images, fps=1)
@@ -112,15 +109,11 @@ def generate_gif_from_images(image_paths, output_path):
     else:
         print("[!] Not enough images to create a GIF.")
 
-
-
-
 class CustomController(Controller):
     def __init__(self, exclude_actions: list[str] = [],
                  output_model: Optional[Type[BaseModel]] = None,
-                 ask_assistant_callback: Optional[Union[Callable[[str, BrowserContext], Dict[str, Any]], Callable[
-                     [str, BrowserContext], Awaitable[Dict[str, Any]]]]] = None,
-                 ):
+                 ask_assistant_callback: Optional[Union[Callable[[str, BrowserContext], Dict[str, Any]],
+                                                        Callable[[str, BrowserContext], Awaitable[Dict[str, Any]]]]] = None):
         super().__init__(exclude_actions=exclude_actions, output_model=output_model)
         self._register_custom_actions()
         self.ask_assistant_callback = ask_assistant_callback
@@ -128,8 +121,6 @@ class CustomController(Controller):
         self.mcp_server_config = None
 
     def _register_custom_actions(self):
-        """Register all custom browser actions"""
-
         @self.registry.action(
             "When executing tasks, prioritize autonomous completion. However, if you encounter a definitive blocker "
             "that prevents you from proceeding independently – such as needing credentials you don't possess, "
@@ -149,18 +140,14 @@ class CustomController(Controller):
                 return ActionResult(extracted_content="Human cannot help you. Please try another way.",
                                     include_in_memory=True)
 
-        @self.registry.action(
-            'Upload file to interactive element with file path ',
-        )
+        @self.registry.action('Upload file to interactive element with file path ')
         async def upload_file(index: int, path: str, browser: BrowserContext, available_file_paths: list[str]):
             if path not in available_file_paths:
                 return ActionResult(error=f'File path {path} is not available')
-
             if not os.path.exists(path):
                 return ActionResult(error=f'File {path} does not exist')
 
             dom_el = await browser.get_dom_element_by_index(index)
-
             file_upload_dom_el = dom_el.get_file_upload_element()
 
             if file_upload_dom_el is None:
@@ -169,7 +156,6 @@ class CustomController(Controller):
                 return ActionResult(error=msg)
 
             file_upload_el = await browser.get_locate_element(file_upload_dom_el)
-
             if file_upload_el is None:
                 msg = f'No file upload element found at index {index}'
                 logger.info(msg)
@@ -192,23 +178,21 @@ class CustomController(Controller):
                   sensitive_data: Optional[Dict[str, str]] = None,
                   available_file_paths: Optional[list[str]] = None,
                   context: Context | None = None,
-                  browser_session: Any = None,  # <-- Added this parameter
-                  file_system: Any = None       # <-- Add this parameter
-                  ) -> ActionResult:
+                  browser_session: Any = None,
+                  file_system: Any = None) -> ActionResult:
         try:
             for action_name, params in action.model_dump(exclude_unset=True).items():
                 if params is not None:
                     result = await self.registry.execute_action(
                         action_name,
                         params,
-                        browser_session=browser_session,           # <-- use browser_session
+                        browser_session=browser_session,
                         page_extraction_llm=page_extraction_llm,
                         file_system=file_system,
                         sensitive_data=sensitive_data,
                         available_file_paths=available_file_paths,
                         context=context,
                     )
-
                     if isinstance(result, str):
                         return ActionResult(extracted_content=result)
                     elif isinstance(result, ActionResult):
@@ -220,6 +204,7 @@ class CustomController(Controller):
             return ActionResult()
         except Exception as e:
             raise e
+
     async def setup_mcp_client(self, mcp_server_config: Optional[Dict[str, Any]] = None):
         self.mcp_server_config = mcp_server_config
         if self.mcp_server_config:
@@ -227,9 +212,6 @@ class CustomController(Controller):
             self.register_mcp_tools()
 
     def register_mcp_tools(self):
-        """
-        Register the MCP tools used by this controller.
-        """
         if self.mcp_client:
             for server_name in self.mcp_client.server_name_to_tools:
                 for tool in self.mcp_client.server_name_to_tools[server_name]:
@@ -244,11 +226,12 @@ class CustomController(Controller):
                 logger.debug(
                     f"Registered {len(self.mcp_client.server_name_to_tools[server_name])} mcp tools for {server_name}")
         else:
-            logger.warning(f"MCP client not started.")
+            logger.warning("MCP client not started.")
 
     async def close_mcp_client(self):
         if self.mcp_client:
             await self.mcp_client.__aexit__(None, None, None)
+
 async def run_agent_task(prompt: str):
     ensure_dirs()
 
@@ -286,61 +269,59 @@ async def run_agent_task(prompt: str):
     try:
         from custom_browser.custom_browser import CustomBrowser  # local package
 
-        # Pull defaults from browser_use.config (DB-style config)
-        cfg = CONFIG.load_config()            # dict with 'browser_profile', 'llm', 'agent'
+        cfg = CONFIG.load_config()
         profile = cfg.get("browser_profile", {}) or {}
 
-        # Build a minimal config object that CustomBrowser expects
-        # (align with attributes your CustomBrowser / base Browser reads)
         new_context_cfg = SimpleNamespace(
             window_width=profile.get("window_width", 1280),
             window_height=profile.get("window_height", 800),
         )
         custom_cfg = SimpleNamespace(
-            # Common flags
             headless=bool(profile.get("headless", False)),
-            browser_class=str(profile.get("browser_class", "chromium")),   # chromium|firefox|webkit
+            browser_class=str(profile.get("browser_class", "chromium")),
             extra_browser_args=list(profile.get("extra_browser_args", [])),
             deterministic_rendering=bool(profile.get("deterministic_rendering", False)),
             disable_security=bool(profile.get("disable_security", False)),
             chrome_remote_debugging_port=int(profile.get("chrome_remote_debugging_port", 9222)),
-            proxy=None,                         # set to SimpleNamespace(server=..., username=..., password=...) if needed
-            new_context_config=new_context_cfg, # used for window size when not headless
-            # Optional/ignored fields your code might read:
-            browser_binary_path=None,           # ensure builtin browser launch path
+            proxy=None,
+            new_context_config=new_context_cfg,
+            browser_binary_path=None,
             user_data_dir=profile.get("user_data_dir"),
         )
 
-        # 1) Spin up your custom browser and context
         custom_browser = CustomBrowser()
-        # Inject config expected by your CustomBrowser/base Browser
         custom_browser.config = custom_cfg
-
         custom_context = await custom_browser.new_context()
 
-        # 2) Acquire a Playwright Page
         page = getattr(custom_context, "page", None)
         if page is None and hasattr(custom_context, "new_page"):
             page = await custom_context.new_page()
         if page is None:
             raise RuntimeError("Could not obtain a Playwright Page from CustomBrowserContext")
 
-        # 3) Wrap in your existing BrowserSession so downstream code stays unchanged
         browser_session = BrowserSession(page=page)
 
-        # 4) Screenshot capture loop (unchanged cadence)
         async def capture_loop():
             frame = 0
             while not stop_capture_flag[0]:
                 try:
-                    screenshot_path = os.path.join(screenshot_dir, f"frame_{frame}.png")
-                    await page.screenshot(path=screenshot_path)
+                    jpeg_bytes = await page.screenshot(type="jpeg", quality=70)
+
+                    # Feed the live stream
+                    update_latest_jpeg(jpeg_bytes)
+
+                    # Save for GIF later
+                    screenshot_path = os.path.join(screenshot_dir, f"frame_{frame:06d}.jpg")
+                    with open(screenshot_path, "wb") as f:
+                        f.write(jpeg_bytes)
                     screenshots.append(screenshot_path)
+
                     print(f"[+] Captured screenshot: {screenshot_path} (total: {len(screenshots)})")
                     frame += 1
                 except Exception as e:
                     print(f"[ERROR] Failed to capture screenshot: {e}")
-                await asyncio.sleep(1)
+
+                await asyncio.sleep(0.15)  # ~6–7 fps
 
         capture_task = asyncio.create_task(capture_loop())
 
@@ -352,9 +333,7 @@ async def run_agent_task(prompt: str):
     status = "fail"
 
     if not used_fallback:
-        # --- proceed using CustomBrowser path ---
         controller = CustomController(output_model=TestResult)
-
         try:
             if mcp_server_config:
                 await controller.setup_mcp_client(mcp_server_config)
@@ -366,7 +345,6 @@ async def run_agent_task(prompt: str):
                 controller=controller,
                 max_steps=100
             )
-
             try:
                 history = await agent.run()
                 final_output = history.final_result()
@@ -381,7 +359,6 @@ async def run_agent_task(prompt: str):
                 if capture_task:
                     await capture_task
         finally:
-            # Clean up custom context/browser and MCP
             try:
                 if custom_context and hasattr(custom_context, "close"):
                     await custom_context.close()
@@ -396,12 +373,9 @@ async def run_agent_task(prompt: str):
                 await controller.close_mcp_client()
 
     else:
-        # --- fallback path: original Playwright persistent context ---
-        from playwright.async_api import async_playwright
-
         async with async_playwright() as playwright:
             try:
-                print("[DEBUG] Starting persistent browser launch...")
+                print("[DEBUG] Starting persistent browser launch...]")
                 browser = await playwright.chromium.launch_persistent_context(
                     user_data_dir="user_data",
                     headless=False,
@@ -419,14 +393,20 @@ async def run_agent_task(prompt: str):
                 frame = 0
                 while not stop_capture_flag[0]:
                     try:
-                        screenshot_path = os.path.join(screenshot_dir, f"frame_{frame}.png")
-                        await page.screenshot(path=screenshot_path)
+                        jpeg_bytes = await page.screenshot(type="jpeg", quality=70)
+
+                        update_latest_jpeg(jpeg_bytes)
+
+                        screenshot_path = os.path.join(screenshot_dir, f"frame_{frame:06d}.jpg")
+                        with open(screenshot_path, "wb") as f:
+                            f.write(jpeg_bytes)
                         screenshots.append(screenshot_path)
+
                         print(f"[+] Captured screenshot: {screenshot_path} (total: {len(screenshots)})")
                         frame += 1
                     except Exception as e:
                         print(f"[ERROR] Failed to capture screenshot: {e}")
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.15)
 
             capture_task = asyncio.create_task(capture_loop())
 
@@ -443,7 +423,6 @@ async def run_agent_task(prompt: str):
                     controller=controller,
                     max_steps=100
                 )
-
                 try:
                     history = await agent.run()
                     final_output = history.final_result()

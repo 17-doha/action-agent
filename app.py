@@ -1,9 +1,10 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, render_template, Response, send_from_directory, request, jsonify
 from main import run_prompt
 import os
 import json
 import re
 import traceback
+from utils.stream import mjpeg_generator
 
 app = Flask(__name__, static_url_path='', template_folder="templates")
 
@@ -21,6 +22,12 @@ def serve_static_files(path):
 def home():
     """Serves the main index.html file."""
     return send_from_directory("templates", "index.html")
+
+@app.route("/stream")
+def stream():
+    # Live MJPEG stream for the <img src="/stream">
+    return Response(mjpeg_generator(),
+                    mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.route("/run", methods=["POST"])
